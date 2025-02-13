@@ -1302,11 +1302,28 @@ async function middleware(
 /**
  * Represents a verified session.
  */
-export interface Session<TIdentity extends Identity> {
-  identity: TIdentity | null;
-  accessToken?: string;
-  idToken?: string;
+export interface VerifiedSession<TIdentity extends Identity> {
+  status: "authenticated";
+  identity: TIdentity;
+  accessToken: string;
+  idToken: string;
 }
+
+/**
+ * Represents a session that failed the verification.
+ */
+export interface UnverifiedSession {
+  status:
+    | "no-active-session"
+    | "internal-error"
+    | "verification-failed"
+    | "not-authorized"
+    | "expired";
+}
+
+export type Session<TIdentity extends Identity> =
+  | VerifiedSession<TIdentity>
+  | UnverifiedSession;
 
 /**
  * Verifies the id token against the known JWK set.
@@ -1497,8 +1514,15 @@ async function getSession<TIdentity extends Identity>(
     verifyAccessToken(context, cookieJar),
   ]);
 
+  if (
+    idTokenVerificationError === "unset" &&
+    accessTokenVerificationError === "unset"
+  ) {
+    return { status: "no-active-session" };
+  }
+
   if (idTokenVerificationError || accessTokenVerificationError) {
-    return { identity: null };
+    return { status: "verification-failed" };
   }
 
   const { idToken, verifiedIdToken } = id;
@@ -1518,8 +1542,9 @@ async function getSession<TIdentity extends Identity>(
           identity,
           idToken,
           accessToken,
+          status: "authenticated",
         }
-      : { identity: null }
+      : { status: "verification-failed" }
   ) satisfies Session<TIdentity>;
 }
 
@@ -2009,7 +2034,7 @@ export function configureAuthenticationProvider<TIdentity extends Identity>({
     const [context, contextError] = await getContext();
     if (contextError !== null) {
       return {
-        identity: null,
+        status: "internal-error",
       };
     }
     return await getSession(context);
