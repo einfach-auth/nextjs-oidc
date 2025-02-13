@@ -1,0 +1,56 @@
+{
+  "name": "@einfach-auth/nextjs-oidc",
+  "version": "0.1.0",
+  "author": "Fabian Haenel <contact@fabian-haenel.io>",
+  "license": "BSD-3-Clause",
+  "keywords": [
+    "oidc",
+    "auth",
+    "nextjs"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "format": "prettier -w ."
+  },
+  "packageManager": "pnpm@9.15.3+sha512.1f79bc245a66eb0b07c5d4d83131240774642caaa86ef7d0434ab47c0d16f66b04e21e0c086eb61e62c77efc4d7f7ec071afad3796af64892fae66509173893a",
+  "dependencies": {
+    "jose": "^5.9.6",
+    "oauth4webapi": "^3.1.4"
+  },
+  "peerDependencies": {
+    "next": "^15",
+    "react": "^19"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.2",
+    "@types/react": "^19.0.8",
+    "next": "^15.1.7",
+    "prettier": "4.0.0-alpha.10",
+    "react": "^19.0.0",
+    "tsup": "^8.3.6",
+    "typescript": "^5.7.3"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist/index.js",
+    "dist/index.d.ts",
+    "dist/index.cjs",
+    "dist/index.d.cts"
+  ],
+  "exports": {
+    ".": {
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      },
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      }
+    },
+    "./package.json": "./package.json"
+  }
+}

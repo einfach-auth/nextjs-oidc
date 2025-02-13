@@ -1,0 +1,31 @@
+{
+  "files": ["./src/index.ts"],
+  "compilerOptions": {
+    "target": "es2022",
+    "module": "ESNext",
+    "lib": ["dom", "dom.iterable", "ES2022"],
+    "skipLibCheck": true,
+    "skipDefaultLibCheck": true,
+
+    /* Bundler mode */
+    "moduleResolution": "bundler",
+    "outDir": "dist",
+    "allowImportingTsExtensions": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "declaration": true,
+    "declarationMap": true,
+    "stripInternal": true,
+
+    /* Linting */
+    "strict": true,
+    "allowJs": false,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedSideEffectImports": true,
+    "forceConsistentCasingInFileNames": true,
+    "strictNullChecks": true
+  }
+}
