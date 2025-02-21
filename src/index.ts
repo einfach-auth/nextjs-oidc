@@ -1400,7 +1400,9 @@ export interface VerifiedSession<TIdentity extends Identity> {
   status: "authenticated";
   identity: TIdentity;
   accessToken: string;
+  verifiedAccessToken: jose.JWTPayload | Identity;
   idToken: string;
+  verifiedIdToken: jose.JWTPayload;
 }
 
 /**
@@ -1640,7 +1642,9 @@ async function getSession<TIdentity extends Identity>(
       ? {
           identity,
           idToken,
+          verifiedIdToken,
           accessToken,
+          verifiedAccessToken,
           status: "authenticated",
         }
       : { status: "verification-failed" }
