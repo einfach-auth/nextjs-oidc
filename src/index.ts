@@ -4,7 +4,11 @@ import * as jose from "jose";
 import { cookies, headers } from "next/headers";
 import { redirect, RedirectType } from "next/navigation";
 import { NextRequest, NextResponse } from "next/server";
-import type { CookieListItem } from "next/dist/compiled/@edge-runtime/cookies";
+import type {
+  CookieListItem,
+  ResponseCookie,
+} from "next/dist/compiled/@edge-runtime/cookies";
+import { allowInsecureRequests } from "oauth4webapi";
 
 /**
  * The result type is used to annotate functions that may return expected errors in a go-like manner.
@@ -216,6 +220,11 @@ export type RevokeSessionOnLogout =
  */
 interface AuthContext<TIdentity extends Identity = Identity> {
   /**
+   * Determines the security context.
+   */
+  secure: boolean;
+
+  /**
    * The OAuth 2.0 client.
    */
   client: oauth.Client;
@@ -359,10 +368,30 @@ interface AuthContext<TIdentity extends Identity = Identity> {
 
   /**
    * Configures the cookie names.
-   *
-   * These names might be modified to match security configurations (e.g. "__Host"-prefix)
    */
   cookieNames: CookieNames;
+
+  /**
+   * Trust the x-forwarded-* and host headers.
+   *
+   * This should only be set to true when running behind a reverse proxy that sets these headers.
+   */
+  trustForwardedHeaders: boolean;
+
+  /**
+   * The allowed hosts for the application.
+   *
+   * If unset, all hosts are allowed.
+   */
+  allowedHosts?: (string | RegExp)[];
+
+  /**
+   * The canonical host for the application.
+   *
+   * Setting this value will always use this value for action URLs.
+   * Additionally, it will bypass the allowed hosts check.
+   */
+  canonicalHost?: string;
 }
 
 /**
@@ -486,7 +515,7 @@ interface AuthCookieArgs {
 function buildAuthCookie(
   context: AuthContext,
   args: AuthCookieArgs,
-  setCookie: (args: CookieListItem) => void,
+  setCookie: (args: ResponseCookie) => void,
   getCookie: (
     name: string,
   ) => Pick<CookieListItem, "name" | "value"> | undefined,
@@ -535,12 +564,21 @@ function buildAuthCookie(
             return "encryption-failed";
         }
 
+        /**
+         * Use secure cookies if the context requires security.
+         *
+         * For more on prefixes see https://googlechrome.github.io/samples/cookie-prefixes/
+         */
+        const cookiePrefix = context.secure ? "__Secure-" : "";
         try {
           setCookie({
-            name: args.name,
+            name: `${cookiePrefix}${args.name}`,
             value: cipherValue,
             expires: expires,
             path: args.path,
+            httpOnly: true,
+            sameSite: "lax",
+            secure: context.secure,
           });
         } catch {
           return "operation-failed";
@@ -687,21 +725,51 @@ function cookieJarFromResponse(
 /**
  * Internal header used to pass the request URL to react components.
  */
-export const REQUEST_URL_HEADER = "next-internal-request-url";
+export const REQUEST_URL_HEADER = "x-next-request-url";
 
 /**
- * Function to access the request URL stored in the headers.
+ * Get the base URL to build action URLs.
  *
- * @returns Success: The request URL
- * @returns Error("header-not-set"): The required header was not set. Most likely a middleware error.
+ * @returns Success: The action base URL
+ * @returns Error("host-undefined"): The request host is undefined or empty.
+ * @returns Error("untrusted-host"): The request was initiated from an untrusted host.
  */
-export async function getRequestUrl(): Promise<Result<URL, "header-not-set">> {
-  const _headers = await headers();
-  const requestUrl = _headers.get(REQUEST_URL_HEADER);
-  if (requestUrl === null) {
-    return [null, "header-not-set"];
+async function getActionUrl(
+  context: AuthContext,
+): Promise<Result<URL, "host-undefined" | "untrusted-host">> {
+  if (context.canonicalHost !== undefined) {
+    return [new URL(context.canonicalHost), null];
   }
-  return [new URL(requestUrl), null];
+
+  let host: string | null = null;
+
+  const _headers = await headers();
+  if (context.trustForwardedHeaders) {
+    host = _headers.get("x-forwarded-host") ?? _headers.get("host");
+  }
+
+  if (host === null || host === "") {
+    return [null, "host-undefined"];
+  }
+
+  if (
+    context.allowedHosts?.some((hostCheck) =>
+      typeof hostCheck === "string" ? host === hostCheck : hostCheck.test(host),
+    ) === false
+  ) {
+    return [null, "untrusted-host"];
+  }
+
+  // @ts-expect-error `x-forwarded-proto` is not nullable, Next.js sets it by default
+  let protocol: string = _headers.get("x-forwarded-proto");
+
+  if (protocol.endsWith(":")) {
+    protocol = protocol.slice(0, -1);
+  }
+  if (context.secure && protocol !== "https") {
+    protocol = "https";
+  }
+  return [new URL(`${protocol}://${host}`), null];
 }
 
 /**
@@ -710,7 +778,26 @@ export async function getRequestUrl(): Promise<Result<URL, "header-not-set">> {
  * @param request the request instance to modify.
  */
 function makeRequestUrlAvailable(request: NextRequest): void {
-  request.headers.set(REQUEST_URL_HEADER, request.url);
+  const requestUrl = new URL(request.url);
+  requestUrl.host =
+    request.headers.get("x-forwarded-host") ??
+    request.headers.get("host") ??
+    requestUrl.host;
+  requestUrl.protocol =
+    request.headers.get("x-forwarded-proto") ?? requestUrl.protocol;
+  request.headers.set(REQUEST_URL_HEADER, requestUrl.toString());
+}
+
+export async function getRequestUrl(): Promise<URL> {
+  const _headers = await headers();
+  const requestUrl = _headers.get(REQUEST_URL_HEADER);
+  if (requestUrl === null) {
+    throw new Error(
+      "Request URL header is not set. Is the middleware installed?",
+    );
+  }
+
+  return new URL(requestUrl);
 }
 
 /**
@@ -721,7 +808,7 @@ function makeRequestUrlAvailable(request: NextRequest): void {
  * @param plaintextState An optional state in plaintext to continue the session after signing in. Will be encrypted before appending to URL.
  * @returns Success: An object returning the authorization URL for the redirect, the generated code verifier and the nonce if required.
  * @returns Error(authorization-endpoint-undefined): The authorization endpoint is not defined in the OIDC discovery document.
- * @returns Error(request-url-undefined): The request URL is not available. (This is like most likely caused by a miss-configured middleware)
+ * @returns Error(action-url-unavailable): The action URL is not available.
  * @returns Error(encryption-failed): The encryption of the state failed.
  */
 async function generateAuthorizationUrl(
@@ -735,7 +822,7 @@ async function generateAuthorizationUrl(
       codeVerifier: string;
     },
     | "authorization-endpoint-undefined"
-    | "request-url-undefined"
+    | "action-url-unavailable"
     | "encryption-failed"
   >
 > {
@@ -774,11 +861,11 @@ async function generateAuthorizationUrl(
   await context.customizeAuthorizationUrl(authorizationUrl.searchParams);
   authorizationUrl.searchParams.set("client_id", context.client.client_id);
 
-  const [requestUrl, requestUrlError] = await getRequestUrl();
-  if (requestUrlError !== null) {
-    return [null, "request-url-undefined"];
+  const [actionUrl, actionUrlError] = await getActionUrl(context);
+  if (actionUrlError !== null) {
+    return [null, "action-url-unavailable"];
   }
-  const redirectUrl = new URL(context.callbackPath, requestUrl);
+  const redirectUrl = new URL(context.callbackPath, actionUrl);
   authorizationUrl.searchParams.set("redirect_uri", redirectUrl.toString());
   authorizationUrl.searchParams.set("response_type", "code");
   authorizationUrl.searchParams.set("scope", context.scope);
@@ -886,6 +973,7 @@ async function revokeToken(
         additionalParameters: {
           token_type_hint: tokenTypeHint,
         },
+        [allowInsecureRequests]: !context.secure,
       },
     );
     await oauth.processRevocationResponse(revocationResponse);
@@ -902,7 +990,7 @@ async function generateEndSessionUrl(
 ): Promise<
   Result<
     URL,
-    "unsupported-endpoint" | "request-url-undefined" | "encryption-failed"
+    "unsupported-endpoint" | "action-url-unavailable" | "encryption-failed"
   >
 > {
   if (context.authorizationServer.end_session_endpoint === undefined) {
@@ -924,11 +1012,11 @@ async function generateEndSessionUrl(
   }
 
   if (context.postLogoutPath !== undefined) {
-    const [requestUrl, requestUrlError] = await getRequestUrl();
-    if (requestUrlError !== null) {
-      return [null, "request-url-undefined"];
+    const [actionUrl, actionUrlError] = await getActionUrl(context);
+    if (actionUrlError !== null) {
+      return [null, "action-url-unavailable"];
     }
-    const redirectUrl = new URL(context.postLogoutPath, requestUrl);
+    const redirectUrl = new URL(context.postLogoutPath, actionUrl);
     endSessionUrl.searchParams.set(
       "post_logout_redirect_uri",
       redirectUrl.toString(),
@@ -1172,6 +1260,7 @@ async function callback(
       params,
       callbackUrl.toString(),
       codeVerifier,
+      { [allowInsecureRequests]: !context.secure },
     );
 
     tokenResponse = await oauth.processAuthorizationCodeResponse(
@@ -1266,7 +1355,7 @@ async function middleware(
         context.client,
         context.clientAuth,
         refreshToken,
-        {},
+        { [allowInsecureRequests]: !context.secure },
       );
 
       tokenResponse = await oauth.processRefreshTokenResponse(
@@ -1319,6 +1408,9 @@ export interface UnverifiedSession {
     | "verification-failed"
     | "not-authorized"
     | "expired";
+  identity?: undefined;
+  accessToken?: undefined;
+  idToken?: undefined;
 }
 
 export type Session<TIdentity extends Identity> =
@@ -1409,6 +1501,7 @@ async function verifyAccessToken(
           context.client,
           context.clientAuth,
           accessToken,
+          { [allowInsecureRequests]: !context.secure },
         );
         verifiedAccessToken = await oauth.processIntrospectionResponse(
           context.authorizationServer,
@@ -1480,6 +1573,7 @@ async function verifyIdentity<TIdentity extends Identity>(
           context.authorizationServer,
           context.client,
           accessToken,
+          { [allowInsecureRequests]: !context.secure },
         );
         const identity = await oauth.processUserInfoResponse(
           context.authorizationServer,
@@ -1552,14 +1646,18 @@ async function getSession<TIdentity extends Identity>(
  * Get the authorization server from the discovery endpoint
  *
  * @param issuer The issuer URL
+ * @param allowInsecure Whether to allow insecure requests
  * @returns Success: The discovery information
  * @returns Error("request-error"): The request failed or returned with an unsuccessful or bad response
  */
 async function fetchAuthorizationServer(
   issuer: URL,
+  allowInsecure: boolean,
 ): Promise<Result<oauth.AuthorizationServer, "request-error">> {
   try {
-    const discoveryResponse = await oauth.discoveryRequest(issuer);
+    const discoveryResponse = await oauth.discoveryRequest(issuer, {
+      [allowInsecureRequests]: allowInsecure,
+    });
     const authorizationServer = await oauth.processDiscoveryResponse(
       issuer,
       discoveryResponse,
@@ -1669,6 +1767,15 @@ function functionCache<TValue extends oauth.JsonValue, TError extends string>(
     return cachedValue.promise;
   };
 }
+
+/**
+ * By default the library enforces security in production.
+ * Setting this option enables bypassing this behavior.
+ *
+ * @deprecated To make it stand out as something you shouldn't use, possibly only for local
+ *  *   development and testing against non-TLS secured environments.
+ */
+export const bypassSecureCheck = Symbol("bypassSecureCheck");
 
 /**
  * The configuration options for the authentication provider.
@@ -1832,11 +1939,11 @@ export interface AuthenticationProviderConfig<TIdentity extends Identity> {
    * These names might be modified to match security configurations (e.g. "__Host"-prefix)
    *
    * @default {
-   *     nonce: "SIMPLE_AUTH.NONCE",
-   *     codeVerifier: "SIMPLE_AUTH.CODE_VERIFIER",
-   *     idToken: "SIMPLE_AUTH.ID_TOKEN",
-   *     accessToken: "SIMPLE_AUTH.ACCESS_TOKEN",
-   *     refreshToken: "SIMPLE_AUTH.REFRESH_TOKEN",
+   *     nonce: "EINFACH_AUTH.NONCE",
+   *     codeVerifier: "EINFACH_AUTH.CODE_VERIFIER",
+   *     idToken: "EINFACH_AUTH.ID_TOKEN",
+   *     accessToken: "EINFACH_AUTH.ACCESS_TOKEN",
+   *     refreshToken: "EINFACH_AUTH.REFRESH_TOKEN",
    *   }
    */
   cookieNames?: CookieNames;
@@ -1856,6 +1963,41 @@ export interface AuthenticationProviderConfig<TIdentity extends Identity> {
    * @default 43_200_000 = 12 Hours
    */
   jwksCachingDuration?: number;
+
+  /**
+   * Trust the x-forwarded-* and host headers.
+   *
+   * This should only be set to true when running behind a reverse proxy that sets these headers.
+   *
+   * @default true if {@link process.env.NODE_ENV} is "development" else false
+   */
+  trustForwardedHeaders?: boolean;
+
+  /**
+   * The allowed hosts for the application.
+   *
+   * If unset, all hosts are allowed.
+   */
+  allowedHosts?: (string | RegExp)[];
+
+  /**
+   * The canonical host for the application.
+   *
+   * Setting this value will always use this value for action URLs.
+   * Additionally, it will bypass the allowed hosts check.
+   */
+  canonicalHost?: string;
+
+  /**
+   * Bypass the security enforcements.
+   *
+   * For any environment other than development:
+   * - Disables the https enforcement for action URLs.
+   * - Disables the secure cookie flag.
+   * - Disables the __Secure- prefix for cookies.
+   * - Disables https enforcement for OAuth2 endpoints.
+   */
+  [bypassSecureCheck]?: boolean;
 }
 
 /**
@@ -1942,9 +2084,8 @@ export function configureAuthenticationProvider<TIdentity extends Identity>({
   verifyIdentity = "id-token",
   revokeSessionOnLogout = "revoke-tokens",
   postLogoutPath = undefined,
-  redirectUrlFromState = (state) => Promise.resolve(!!state ? state : "/"),
-  redirectUrlFromCallbackError = (_, request) =>
-    Promise.resolve(new URL(new URL(request.url).origin)),
+  redirectUrlFromState = undefined,
+  redirectUrlFromCallbackError = undefined,
   customizeAuthorizationUrl = (_) => Promise.resolve(),
   callbackPath = "/auth/callback",
   signInTTL = 600_000,
@@ -1952,19 +2093,29 @@ export function configureAuthenticationProvider<TIdentity extends Identity>({
   fallbackAccessTokenTTL = 1_800_000,
   fallbackIdTokenTTL = 1_800_000,
   cookieNames = {
-    nonce: "SIMPLE_AUTH.NONCE",
-    codeVerifier: "SIMPLE_AUTH.CODE_VERIFIER",
-    idToken: "SIMPLE_AUTH.ID_TOKEN",
-    accessToken: "SIMPLE_AUTH.ACCESS_TOKEN",
-    refreshToken: "SIMPLE_AUTH.REFRESH_TOKEN",
+    nonce: "EINFACH_AUTH.NONCE",
+    codeVerifier: "EINFACH_AUTH.CODE_VERIFIER",
+    idToken: "EINFACH_AUTH.ID_TOKEN",
+    accessToken: "EINFACH_AUTH.ACCESS_TOKEN",
+    refreshToken: "EINFACH_AUTH.REFRESH_TOKEN",
   },
   cache = functionCache,
   jwksCachingDuration = 43_200_000,
+  trustForwardedHeaders = process.env.NODE_ENV === "development",
+  allowedHosts = undefined,
+  canonicalHost = undefined,
+  ...config
 }: AuthenticationProviderConfig<TIdentity>): AuthenticationProvider<TIdentity> {
   const getAuthorizationServer = cache<
     oauth.AuthorizationServer,
     "request-error"
-  >(() => fetchAuthorizationServer(issuer));
+  >(() =>
+    fetchAuthorizationServer(
+      issuer,
+      config[bypassSecureCheck] === true &&
+        process.env.NODE_ENV === "development",
+    ),
+  );
 
   // Preload authorization server
   getAuthorizationServer();
@@ -1988,6 +2139,12 @@ export function configureAuthenticationProvider<TIdentity extends Identity>({
   const getContext = async (): Promise<
     Result<AuthContext<TIdentity>, "authorization-server-error" | "jwks-error">
   > => {
+    const _headers = await headers();
+    const secure =
+      config[bypassSecureCheck] !== true &&
+      (process.env.NODE_ENV !== "development" ||
+        _headers.get("x-forwarded-proto") === "https");
+
     const [authorizationServer, authorizationServerError] =
       await getAuthorizationServer();
     if (authorizationServerError !== null) {
@@ -2003,8 +2160,16 @@ export function configureAuthenticationProvider<TIdentity extends Identity>({
     const getJWKFromSet = jose.createLocalJWKSet(
       jwks as jose.JSONWebKeySet, // This casting is fine, as jose and oauth4webapi define the same standardized interface with slightly different constraints
     );
-
+    redirectUrlFromState ??= async () => {
+      const requestUrl = await getRequestUrl();
+      return new URL(requestUrl.origin);
+    };
+    redirectUrlFromCallbackError ??= async () => {
+      const requestUrl = await getRequestUrl();
+      return new URL(requestUrl.origin);
+    };
     const context = {
+      secure: secure,
       client,
       clientAuth,
       scope,
@@ -2025,6 +2190,9 @@ export function configureAuthenticationProvider<TIdentity extends Identity>({
       authorizationServer,
       jwks,
       getJWKFromSet,
+      trustForwardedHeaders,
+      allowedHosts,
+      canonicalHost,
     } satisfies AuthContext<TIdentity>;
 
     return [context, null];
