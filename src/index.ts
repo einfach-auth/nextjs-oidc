@@ -779,6 +779,7 @@ async function getActionUrl(
  */
 function makeRequestUrlAvailable(request: NextRequest): void {
   const requestUrl = new URL(request.url);
+  // This does have security implications if the request is not behind a trusted proxy.
   requestUrl.host =
     request.headers.get("x-forwarded-host") ??
     request.headers.get("host") ??
@@ -1200,8 +1201,12 @@ async function callback(
   context: AuthContext,
   request: NextRequest,
 ): Promise<NextResponse> {
+  // Fallback to default Next.js request URL, if the header is not set
+  const requestUrl = new URL(
+    request.headers.get(REQUEST_URL_HEADER) ?? request.url,
+  );
   const requestCookieJar = cookieJarFromRequest(context, request);
-  const response = NextResponse.redirect(new URL(request.url).origin);
+  const response = NextResponse.redirect(requestUrl.origin);
   const responseCookieJar = cookieJarFromResponse(context, response);
   // Purge used code verifier and nonce cookies
   responseCookieJar.codeVerifier.clear();
@@ -1230,13 +1235,12 @@ async function callback(
     return await errorResponse("code-verifier-undefined");
   }
 
-  const currentUrl: URL = new URL(request.url);
   let params: URLSearchParams;
   try {
     params = oauth.validateAuthResponse(
       context.authorizationServer,
       context.client,
-      currentUrl,
+      requestUrl,
       oauth.skipStateCheck,
     );
   } catch (e) {
@@ -1252,7 +1256,7 @@ async function callback(
 
   let tokenResponse: oauth.TokenEndpointResponse;
   try {
-    const callbackUrl = new URL(context.callbackPath, request.url);
+    const callbackUrl = new URL(context.callbackPath, requestUrl);
     const response = await oauth.authorizationCodeGrantRequest(
       context.authorizationServer,
       context.client,
@@ -1275,6 +1279,7 @@ async function callback(
       e instanceof oauth.AuthorizationResponseError ||
       e instanceof oauth.ResponseBodyError
     ) {
+      console.log(e);
       error = "token-exchange-failed";
     }
     return await errorResponse(error);
@@ -2164,9 +2169,11 @@ export function configureAuthenticationProvider<TIdentity extends Identity>({
       const requestUrl = await getRequestUrl();
       return new URL(requestUrl.origin);
     };
-    redirectUrlFromCallbackError ??= async () => {
+    redirectUrlFromCallbackError ??= async (error) => {
       const requestUrl = await getRequestUrl();
-      return new URL(requestUrl.origin);
+      const returnUrl = new URL(requestUrl.origin);
+      returnUrl.searchParams.set("einfach_auth_error", error);
+      return returnUrl;
     };
     const context = {
       secure: secure,
