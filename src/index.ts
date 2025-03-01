@@ -10,12 +10,37 @@ import type {
 } from "next/dist/compiled/@edge-runtime/cookies";
 import { allowInsecureRequests } from "oauth4webapi";
 
+export interface Err<TKind extends string = string> {
+  type: TKind;
+  cause?: Err;
+}
+
 /**
  * The result type is used to annotate functions that may return expected errors in a go-like manner.
  */
-export type Result<TValue, TError extends string> =
+export type Result<TValue, TError extends Err> =
   | [TValue, null]
   | [null, TError];
+
+function err<TType extends string, TDetails extends Record<any, any> = {}>(
+  type: TType,
+  cause?: Err,
+  details: TDetails = {} as Record<any, any>,
+): Err<TType> & TDetails {
+  return { type, cause, ...details };
+}
+
+function error<TType extends string, TDetails extends Record<any, any> = {}>(
+  type: TType,
+  cause?: Err,
+  details?: TDetails,
+): [null, Err<TType> & TDetails] {
+  return [null, err(type, cause, details)];
+}
+
+function ok<TValue>(value: TValue): [TValue, null] {
+  return [value, null];
+}
 
 /**
  * Base identity interface.
@@ -40,7 +65,12 @@ export interface EncryptionService {
   encrypt(
     plaintext: string,
   ): Promise<
-    Result<string, "empty-input" | "service-unavailable" | "operation-failed">
+    Result<
+      string,
+      | Err<"encrypt.empty-input">
+      | Err<"encrypt.service-unavailable">
+      | Err<"encrypt.operation-failed">
+    >
   >;
 
   /**
@@ -58,10 +88,10 @@ export interface EncryptionService {
   ): Promise<
     Result<
       string,
-      | "empty-input"
-      | "bad-ciphertext"
-      | "service-unavailable"
-      | "operation-failed"
+      | Err<"decrypt.empty-input">
+      | Err<"decrypt.bad-ciphertext">
+      | Err<"decrypt.service-unavailable">
+      | Err<"decrypt.operation-failed">
     >
   >;
 }
@@ -101,10 +131,15 @@ export function buildSecretEncryptionService(
     encrypt: async (
       plaintext: string,
     ): Promise<
-      Result<string, "empty-input" | "service-unavailable" | "operation-failed">
+      Result<
+        string,
+        | Err<"encrypt.empty-input">
+        | Err<"encrypt.service-unavailable">
+        | Err<"encrypt.operation-failed">
+      >
     > => {
       if (plaintext === "") {
-        return [null, "empty-input"];
+        return error("encrypt.empty-input");
       }
 
       const plaintextEncoded = new TextEncoder().encode(plaintext);
@@ -120,12 +155,11 @@ export function buildSecretEncryptionService(
           key,
           plaintextEncoded,
         );
-        return [
+        return ok(
           `${Buffer.from(iv).toString("base64url")}.${Buffer.from(cipher).toString("base64url")}`,
-          null,
-        ];
+        );
       } catch {
-        return [null, "operation-failed"];
+        return error("encrypt.operation-failed");
       }
     },
 
@@ -134,20 +168,20 @@ export function buildSecretEncryptionService(
     ): Promise<
       Result<
         string,
-        | "empty-input"
-        | "bad-ciphertext"
-        | "service-unavailable"
-        | "operation-failed"
+        | Err<"decrypt.empty-input">
+        | Err<"decrypt.bad-ciphertext">
+        | Err<"decrypt.service-unavailable">
+        | Err<"decrypt.operation-failed">
       >
     > => {
       if (ciphertext === "") {
-        return [null, "empty-input"];
+        return error("decrypt.empty-input");
       }
 
       const cipherSegments = ciphertext.split(".");
 
       if (cipherSegments.length !== 2) {
-        return [null, "bad-ciphertext"];
+        return error("decrypt.bad-ciphertext");
       }
 
       const iv = Buffer.from(cipherSegments[0], "base64url");
@@ -160,9 +194,9 @@ export function buildSecretEncryptionService(
           key,
           cipher,
         );
-        return [Buffer.from(plaintext).toString(), null];
+        return ok(Buffer.from(plaintext).toString());
       } catch {
-        return [null, "operation-failed"];
+        return error("decrypt.operation-failed");
       }
     },
   };
@@ -172,13 +206,13 @@ export function buildSecretEncryptionService(
  * The various callback errors.
  */
 export type CallbackError =
-  | "challenge-cookies-read-error" // Unable to read any of the challenge cookies
-  | "code-verifier-undefined" // The code verifier cookie was not available
-  | "unsupported-flow" // Search parameters indicate an unsupported OAuth2 flow. Implicit and hybrid flows are not supported.
-  | "auth-error" // The authorization server responded with an error
-  | "token-exchange-failed" // The token exchange failed
-  | "setting-cookies-failed" // Unable to set the session cookies
-  | "internal-server-error"; // Somthing went wrong, e.g. unable to fetch data due to timeout, etc.
+  | Err<"callback.challenge-cookies-read-error"> // Unable to read any of the challenge cookies
+  | Err<"callback.code-verifier-undefined"> // The code verifier cookie was not available
+  | Err<"callback.unsupported-flow"> // Search parameters indicate an unsupported OAuth2 flow. Implicit and hybrid flows are not supported.
+  | Err<"callback.auth-error"> // The authorization server responded with an error
+  | Err<"callback.token-exchange-failed"> // The token exchange failed
+  | Err<"callback.setting-cookies-failed"> // Unable to set the session cookies
+  | Err<"callback.request-error">; // Somthing went wrong, e.g. unable to fetch data due to timeout, etc.
 
 /**
  * The context that is passed to the VerifyIdentity function.
@@ -201,7 +235,9 @@ export type VerifyIdentity<TIdentity extends Identity> = (
   verifiedIdentity: jose.JWTPayload,
   accessToken: string | undefined,
   verifiedAccessToken: Identity | jose.JWTPayload,
-) => Promise<Result<TIdentity | null, "verification-failed">>;
+) => Promise<
+  Result<TIdentity | null, Err<"verify-identity.verification-failed">>
+>;
 
 /**
  * Determines the logout behavior.
@@ -412,7 +448,10 @@ interface AuthCookie {
    * @returns Error("decryption-failed"): The cookie was not readable due to the decryption failing.
    */
   get(): Promise<
-    Result<string | undefined, "service-unavailable" | "decryption-failed">
+    Result<
+      string | undefined,
+      Err<"get-cookie.decryption-failed"> & { cookieName: string }
+    >
   >;
 
   /**
@@ -428,7 +467,9 @@ interface AuthCookie {
     value: string,
     expires: Date | number | undefined,
   ): Promise<
-    null | "operation-failed" | "service-unavailable" | "encryption-failed"
+    | null
+    | (Err<"set-cookie.operation-failed"> & { cookieName: string })
+    | (Err<"set-cookie.encryption-failed"> & { cookieName: string })
   >;
 
   /**
@@ -521,58 +562,51 @@ function buildAuthCookie(
   ) => Pick<CookieListItem, "name" | "value"> | undefined,
   deleteCookie: (args: Pick<CookieListItem, "name" | "path">) => void,
 ): AuthCookie {
+  /**
+   * Use secure cookies if the context requires security.
+   *
+   * For more on prefixes see https://googlechrome.github.io/samples/cookie-prefixes/
+   */
+  const cookiePrefix = context.secure ? "__Secure-" : "";
+  const cookieName = `${cookiePrefix}${args.name}`;
+
   if (args.encrypted) {
     return {
-      has(): boolean {
-        return getCookie(args.name)?.value !== undefined;
+      has(): ReturnType<AuthCookie["has"]> {
+        return getCookie(cookieName)?.value !== undefined;
       },
-      async get(): Promise<
-        Result<string | undefined, "service-unavailable" | "decryption-failed">
-      > {
-        const cipherValue = getCookie(args.name)?.value;
+      async get(): ReturnType<AuthCookie["get"]> {
+        const cipherValue = getCookie(cookieName)?.value;
         if (cipherValue === undefined || cipherValue === "") {
-          return [undefined, null];
+          return ok(undefined);
         }
-        const [plaintextValue, error] =
+        const [plaintextValue, decryptionError] =
           await context.encryptionService.decrypt(cipherValue);
-        switch (error) {
-          case null:
-            break;
-          case "service-unavailable":
-            return [null, "service-unavailable"];
-          default:
-            return [null, "decryption-failed"];
+
+        if (decryptionError) {
+          return error("get-cookie.decryption-failed", decryptionError, {
+            cookieName,
+          });
         }
 
-        return [plaintextValue, null];
+        return ok(plaintextValue);
       },
       async set(
         value: string,
         expires: Date | number | undefined,
-      ): Promise<
-        null | "operation-failed" | "service-unavailable" | "encryption-failed"
-      > {
-        const [cipherValue, error] =
+      ): ReturnType<AuthCookie["set"]> {
+        const [cipherValue, encryptionError] =
           await context.encryptionService.encrypt(value);
 
-        switch (error) {
-          case null:
-            break;
-          case "service-unavailable":
-            return "service-unavailable";
-          default:
-            return "encryption-failed";
+        if (encryptionError) {
+          return err("set-cookie.encryption-failed", encryptionError, {
+            cookieName,
+          });
         }
 
-        /**
-         * Use secure cookies if the context requires security.
-         *
-         * For more on prefixes see https://googlechrome.github.io/samples/cookie-prefixes/
-         */
-        const cookiePrefix = context.secure ? "__Secure-" : "";
         try {
           setCookie({
-            name: `${cookiePrefix}${args.name}`,
+            name: cookieName,
             value: cipherValue,
             expires: expires,
             path: args.path,
@@ -581,13 +615,15 @@ function buildAuthCookie(
             secure: context.secure,
           });
         } catch {
-          return "operation-failed";
+          return err("set-cookie.operation-failed", undefined, {
+            cookieName,
+          });
         }
         return null;
       },
-      clear(): void {
+      clear(): ReturnType<AuthCookie["clear"]> {
         deleteCookie({
-          name: args.name,
+          name: cookieName,
           path: args.path,
         });
       },
@@ -595,27 +631,27 @@ function buildAuthCookie(
   }
 
   return {
-    has(): boolean {
-      return getCookie(args.name)?.value !== undefined;
+    has(): ReturnType<AuthCookie["has"]> {
+      return getCookie(cookieName)?.value !== undefined;
     },
-    async get(): Promise<Result<string | undefined, "decryption-failed">> {
-      return [getCookie(args.name)?.value, null];
+    async get(): ReturnType<AuthCookie["get"]> {
+      return ok(getCookie(cookieName)?.value);
     },
     async set(
       value: string,
       expires: Date | number,
-    ): Promise<null | "operation-failed" | "encryption-failed"> {
+    ): ReturnType<AuthCookie["set"]> {
       setCookie({
-        name: args.name,
+        name: cookieName,
         value: value,
         expires: expires,
         path: args.path,
       });
       return null;
     },
-    clear(): void {
+    clear(): ReturnType<AuthCookie["clear"]> {
       deleteCookie({
-        name: args.name,
+        name: cookieName,
         path: args.path,
       });
     },
@@ -736,9 +772,14 @@ export const REQUEST_URL_HEADER = "x-next-request-url";
  */
 async function getActionUrl(
   context: AuthContext,
-): Promise<Result<URL, "host-undefined" | "untrusted-host">> {
+): Promise<
+  Result<
+    URL,
+    Err<"get-action-url.host-undefined"> | Err<"get-action-url.untrusted-host">
+  >
+> {
   if (context.canonicalHost !== undefined) {
-    return [new URL(context.canonicalHost), null];
+    return ok(new URL(context.canonicalHost));
   }
 
   let host: string | null = null;
@@ -749,7 +790,7 @@ async function getActionUrl(
   }
 
   if (host === null || host === "") {
-    return [null, "host-undefined"];
+    return error("get-action-url.host-undefined");
   }
 
   if (
@@ -757,7 +798,7 @@ async function getActionUrl(
       typeof hostCheck === "string" ? host === hostCheck : hostCheck.test(host),
     ) === false
   ) {
-    return [null, "untrusted-host"];
+    return error("get-action-url.untrusted-host");
   }
 
   // @ts-expect-error `x-forwarded-proto` is not nullable, Next.js sets it by default
@@ -769,7 +810,7 @@ async function getActionUrl(
   if (context.secure && protocol !== "https") {
     protocol = "https";
   }
-  return [new URL(`${protocol}://${host}`), null];
+  return ok(new URL(`${protocol}://${host}`));
 }
 
 /**
@@ -822,13 +863,13 @@ async function generateAuthorizationUrl(
       nonce: string | undefined;
       codeVerifier: string;
     },
-    | "authorization-endpoint-undefined"
-    | "action-url-unavailable"
-    | "encryption-failed"
+    | Err<"generate-authorization-url.endpoint-undefined">
+    | Err<"generate-authorization-url.action-url-unavailable">
+    | Err<"generate-authorization-url.encryption-failed">
   >
 > {
   if (context.authorizationServer.authorization_endpoint === undefined) {
-    return [null, "authorization-endpoint-undefined"];
+    return error("generate-authorization-url.endpoint-undefined");
   }
   let authorizationUrl: URL;
   try {
@@ -837,7 +878,7 @@ async function generateAuthorizationUrl(
     );
   } catch {
     // If the authorization endpoint is a bad URL we pretend that it is undefined as it has the same effect
-    return [null, "authorization-endpoint-undefined"];
+    return error("generate-authorization-url.endpoint-undefined");
   }
 
   // Generate the challenge values
@@ -864,7 +905,7 @@ async function generateAuthorizationUrl(
 
   const [actionUrl, actionUrlError] = await getActionUrl(context);
   if (actionUrlError !== null) {
-    return [null, "action-url-unavailable"];
+    return error("generate-authorization-url.action-url-unavailable");
   }
   const redirectUrl = new URL(context.callbackPath, actionUrl);
   authorizationUrl.searchParams.set("redirect_uri", redirectUrl.toString());
@@ -881,19 +922,16 @@ async function generateAuthorizationUrl(
       await context.encryptionService.encrypt(plaintextState);
 
     if (encryptionError !== null) {
-      return [null, "encryption-failed"];
+      return error("generate-authorization-url.encryption-failed");
     }
     authorizationUrl.searchParams.set("state", ciphertextState);
   }
 
-  return [
-    {
-      authorizationUrl,
-      nonce,
-      codeVerifier,
-    },
-    null,
-  ];
+  return ok({
+    authorizationUrl,
+    nonce,
+    codeVerifier,
+  });
 }
 
 /**
@@ -919,14 +957,16 @@ async function signIn(
   context: AuthContext,
   options: SignInOptions,
 ): Promise<
-  void | "generating-authorization-url-failed" | "setting-cookies-failed"
+  | void
+  | Err<"sign-in.generating-authorization-url-failed">
+  | Err<"sign-in.setting-cookies-failed">
 > {
-  const [authorization, error] = await generateAuthorizationUrl(
+  const [authorization, generateUrlError] = await generateAuthorizationUrl(
     context,
     options.state,
   );
-  if (error) {
-    return "generating-authorization-url-failed";
+  if (generateUrlError) {
+    return err("sign-in.generating-authorization-url-failed", generateUrlError);
   }
   const { authorizationUrl, nonce, codeVerifier } = authorization;
 
@@ -936,11 +976,14 @@ async function signIn(
     codeVerifier,
     signInExpires,
   );
+  if (codeVerifierError) {
+    return err("sign-in.setting-cookies-failed", codeVerifierError);
+  }
   const nonceError = !!nonce
     ? await nextCookieJar.nonce.set(nonce, signInExpires)
     : null;
-  if (codeVerifierError || nonceError) {
-    return "setting-cookies-failed";
+  if (nonceError) {
+    return err("sign-in.setting-cookies-failed", nonceError);
   }
 
   redirect(authorizationUrl.toString(), RedirectType.push);
@@ -959,9 +1002,15 @@ async function revokeToken(
   context: AuthContext,
   tokenTypeHint: "access_token" | "refresh_token",
   token: string | undefined,
-): Promise<null | "failed"> {
+): Promise<
+  null | Err<"revoke-token.not-supported"> | Err<"revoke-token.failed">
+> {
   if (token === undefined) {
     return null;
+  }
+
+  if (context.authorizationServer.revocation_endpoint === undefined) {
+    return err("revoke-token.not-supported");
   }
 
   try {
@@ -980,7 +1029,7 @@ async function revokeToken(
     await oauth.processRevocationResponse(revocationResponse);
     return null;
   } catch {
-    return "failed";
+    return err("revoke-token.failed");
   }
 }
 
@@ -991,18 +1040,20 @@ async function generateEndSessionUrl(
 ): Promise<
   Result<
     URL,
-    "unsupported-endpoint" | "action-url-unavailable" | "encryption-failed"
+    | Err<"generate-end-session-url.unsupported-endpoint">
+    | Err<"generate-end-session-url.action-url-unavailable">
+    | Err<"generate-end-session-url.encryption-failed">
   >
 > {
   if (context.authorizationServer.end_session_endpoint === undefined) {
-    return [null, "unsupported-endpoint"];
+    return error("generate-end-session-url.unsupported-endpoint");
   }
   let endSessionUrl: URL;
   try {
     endSessionUrl = new URL(context.authorizationServer.end_session_endpoint);
   } catch {
     // If the authorization endpoint is a bad URL we pretend that it is undefined as it has the same effect
-    return [null, "unsupported-endpoint"];
+    return error("generate-end-session-url.unsupported-endpoint");
   }
 
   endSessionUrl.searchParams.set("client_id", context.client.client_id);
@@ -1015,7 +1066,10 @@ async function generateEndSessionUrl(
   if (context.postLogoutPath !== undefined) {
     const [actionUrl, actionUrlError] = await getActionUrl(context);
     if (actionUrlError !== null) {
-      return [null, "action-url-unavailable"];
+      return error(
+        "generate-end-session-url.action-url-unavailable",
+        actionUrlError,
+      );
     }
     const redirectUrl = new URL(context.postLogoutPath, actionUrl);
     endSessionUrl.searchParams.set(
@@ -1029,12 +1083,15 @@ async function generateEndSessionUrl(
       await context.encryptionService.encrypt(plaintextState);
 
     if (encryptionError !== null) {
-      return [null, "encryption-failed"];
+      return error(
+        "generate-end-session-url.encryption-failed",
+        encryptionError,
+      );
     }
     endSessionUrl.searchParams.set("state", ciphertextState);
   }
 
-  return [endSessionUrl, null];
+  return ok(endSessionUrl);
 }
 
 /**
@@ -1125,7 +1182,11 @@ async function setSessionCookies(
   context: AuthContext,
   tokenResponse: oauth.TokenEndpointResponse,
   cookieJar: CookieJar,
-): Promise<null | "id-token-verification-failed" | "setting-cookies-failed"> {
+): Promise<
+  | null
+  | Err<"set-session-cookies.id-token-verification-failed">
+  | Err<"set-session-cookies.setting-cookies-failed">
+> {
   // Get access, id and refresh token cookies
   const {
     access_token,
@@ -1144,15 +1205,15 @@ async function setSessionCookies(
           ? payload.exp * 1000
           : Date.now() + context.fallbackIdTokenTTL;
     } catch {
-      return "id-token-verification-failed";
+      return err("set-session-cookies.id-token-verification-failed");
     }
 
-    const error = await cookieJar.idToken.set(
+    const cookieError = await cookieJar.idToken.set(
       id_token,
       expires ?? context.fallbackIdTokenTTL,
     );
-    if (error) {
-      return "setting-cookies-failed";
+    if (cookieError) {
+      return err("set-session-cookies.setting-cookies-failed", cookieError);
     }
   }
 
@@ -1162,13 +1223,13 @@ async function setSessionCookies(
       : context.fallbackAccessTokenTTL;
     const expires = Date.now() + expiresIn;
 
-    const error = await cookieJar.accessToken.set(
+    const cookieError = await cookieJar.accessToken.set(
       access_token,
       expires ?? context.fallbackAccessTokenTTL,
     );
 
-    if (error) {
-      return "setting-cookies-failed";
+    if (cookieError) {
+      return err("set-session-cookies.setting-cookies-failed", cookieError);
     }
   }
 
@@ -1180,10 +1241,13 @@ async function setSessionCookies(
         : context.fallbackRefreshTokenTTL;
     const expires = Date.now() + expiresIn;
 
-    const error = await cookieJar.refreshToken.set(refresh_token, expires);
+    const cookieError = await cookieJar.refreshToken.set(
+      refresh_token,
+      expires,
+    );
 
-    if (error) {
-      return "setting-cookies-failed";
+    if (cookieError) {
+      return err("set-session-cookies.setting-cookies-failed", cookieError);
     }
   }
 
@@ -1212,27 +1276,40 @@ async function callback(
   responseCookieJar.codeVerifier.clear();
   responseCookieJar.nonce.clear();
 
-  const errorResponse = async (error: CallbackError): Promise<NextResponse> => {
+  const errorResponse = async (
+    type: CallbackError["type"],
+    cause?: Err,
+  ): Promise<NextResponse> => {
     const redirectUrl = await context.redirectUrlFromCallbackError(
-      error,
+      err(type, cause),
       request,
     );
     response.headers.set("Location", redirectUrl.toString());
     return response;
   };
 
+  const [nonce, nonceError] = await requestCookieJar.nonce.get();
+  // If we are unable to read the cookies, something went wrong
+  if (nonceError) {
+    return await errorResponse(
+      "callback.challenge-cookies-read-error",
+      nonceError,
+    );
+  }
+
   const [codeVerifier, codeVerifierError] =
     await requestCookieJar.codeVerifier.get();
-  const [nonce, nonceError] = await requestCookieJar.nonce.get();
-
   // If we are unable to read the cookies, something went wrong
-  if (nonceError || codeVerifierError) {
-    return await errorResponse("challenge-cookies-read-error");
+  if (codeVerifierError) {
+    return await errorResponse(
+      "callback.challenge-cookies-read-error",
+      codeVerifierError,
+    );
   }
 
   // The code verifier is expected to be available, otherwise the login window has expired
   if (!codeVerifier) {
-    return await errorResponse("code-verifier-undefined");
+    return await errorResponse("callback.code-verifier-undefined");
   }
 
   let params: URLSearchParams;
@@ -1244,14 +1321,13 @@ async function callback(
       oauth.skipStateCheck,
     );
   } catch (e) {
-    let error: CallbackError = "internal-server-error";
     if (e instanceof oauth.AuthorizationResponseError) {
-      error = "auth-error";
+      return await errorResponse("callback.auth-error");
     }
     if (e instanceof oauth.UnsupportedOperationError) {
-      error = "unsupported-flow";
+      return await errorResponse("callback.unsupported-flow");
     }
-    return await errorResponse(error);
+    return await errorResponse("callback.request-error");
   }
 
   let tokenResponse: oauth.TokenEndpointResponse;
@@ -1274,24 +1350,25 @@ async function callback(
       { expectedNonce: nonce },
     );
   } catch (e) {
-    let error: CallbackError = "internal-server-error";
     if (
       e instanceof oauth.AuthorizationResponseError ||
       e instanceof oauth.ResponseBodyError
     ) {
-      console.log(e);
-      error = "token-exchange-failed";
+      return await errorResponse("callback.token-exchange-failed");
     }
-    return await errorResponse(error);
+    return await errorResponse("callback.request-error");
   }
 
-  const error = await setSessionCookies(
+  const setCookiesError = await setSessionCookies(
     context,
     tokenResponse,
     responseCookieJar,
   );
-  if (error) {
-    return await errorResponse("setting-cookies-failed");
+  if (setCookiesError) {
+    return await errorResponse(
+      "callback.setting-cookies-failed",
+      setCookiesError,
+    );
   }
 
   let returnUrl = await context.redirectUrlFromState(params.get("state"));
@@ -1323,6 +1400,11 @@ async function middleware(
   context: AuthContext,
   request: NextRequest,
 ): Promise<NextResponse> {
+  // If the request is the callback, we can skip the session verification
+  if (request.nextUrl.pathname === context.callbackPath) {
+    return NextResponse.next({ request });
+  }
+
   const requestCookieJar = cookieJarFromRequest(context, request);
 
   // Existing session
@@ -1345,7 +1427,8 @@ async function middleware(
       const response = NextResponse.next({
         request,
       });
-      if (refreshTokenError !== "service-unavailable") {
+      // We only need to purge the session cookies if the refresh failed for being invalid
+      if (refreshTokenError?.cause?.type !== "service-unavailable") {
         purgeSessionCookies(cookieJarFromResponse(context, response));
       }
 
@@ -1438,24 +1521,26 @@ async function verifyIdToken(
 ): Promise<
   Result<
     { idToken: string; verifiedIdToken: jose.JWTPayload },
-    "unset" | "cookie-error" | "verification-failed"
+    | Err<"verify-id-token.unset">
+    | Err<"verify-id-token.cookie-error">
+    | Err<"verify-id-token.verification-failed">
   >
 > {
   const [idToken, idTokenCookieError] = await cookieJar.idToken.get();
 
   if (idTokenCookieError !== null) {
-    return [null, "cookie-error"];
+    return error("verify-id-token.cookie-error");
   }
 
   if (idToken === undefined) {
-    return [null, "unset"];
+    return error("verify-id-token.unset");
   }
 
   try {
     const { payload } = await jose.jwtVerify(idToken, context.getJWKFromSet);
-    return [{ idToken, verifiedIdToken: payload }, null];
+    return ok({ idToken, verifiedIdToken: payload });
   } catch (e) {
-    return [null, "verification-failed"];
+    return error("verify-id-token.verification-failed");
   }
 }
 
@@ -1473,18 +1558,20 @@ async function verifyAccessToken(
 ): Promise<
   Result<
     { accessToken: string; verifiedAccessToken: jose.JWTPayload | Identity },
-    "unset" | "cookie-error" | "verification-failed"
+    | Err<"verify-access-token.unset">
+    | Err<"verify-access-token.cookie-error">
+    | Err<"verify-access-token.verification-failed">
   >
 > {
   const [accessToken, accessTokenCookieError] =
     await cookieJar.accessToken.get();
 
   if (accessTokenCookieError !== null) {
-    return [null, "cookie-error"];
+    return error("verify-access-token.cookie-error");
   }
 
   if (accessToken === undefined) {
-    return [null, "unset"];
+    return error("verify-access-token.unset");
   }
 
   let verifiedAccessToken: jose.JWTPayload | Identity;
@@ -1499,7 +1586,7 @@ async function verifyAccessToken(
         verifiedAccessToken = payload;
         break;
       } catch (e) {
-        return [null, "verification-failed"];
+        return error("verify-access-token.verification-failed");
       }
     case "bearer":
       try {
@@ -1517,18 +1604,12 @@ async function verifyAccessToken(
         );
         break;
       } catch {
-        return [null, "verification-failed"];
+        return error("verify-access-token.verification-failed");
       }
     default:
-      return [null, "verification-failed"];
+      return error("verify-access-token.verification-failed");
   }
-  return [
-    {
-      accessToken,
-      verifiedAccessToken,
-    },
-    null,
-  ];
+  return ok({ accessToken, verifiedAccessToken });
 }
 
 /**
@@ -1549,7 +1630,8 @@ async function verifyIdentity<TIdentity extends Identity>(
 ): Promise<
   Result<
     TIdentity | null,
-    "unsupported-identity-source" | "verification-failed"
+    | Err<"verify-identity.unsupported-identity-source">
+    | Err<"verify-identity.verification-failed">
   >
 > {
   if (typeof context.verifyIdentity === "function") {
@@ -1571,9 +1653,9 @@ async function verifyIdentity<TIdentity extends Identity>(
 
   switch (context.verifyIdentity) {
     case "id-token":
-      return [verifiedIdToken as TIdentity, null];
+      return ok(verifiedIdToken as TIdentity);
     case "access-token":
-      return [verifiedAccessToken as TIdentity, null];
+      return ok(verifiedAccessToken as TIdentity);
     case "userinfo":
       try {
         const userInfoResponse = await oauth.userInfoRequest(
@@ -1588,12 +1670,12 @@ async function verifyIdentity<TIdentity extends Identity>(
           oauth.skipSubjectCheck,
           userInfoResponse,
         );
-        return [identity as unknown as TIdentity, null];
+        return ok(identity as unknown as TIdentity);
       } catch {
-        return [null, "verification-failed"];
+        return error("verify-identity.verification-failed");
       }
     default:
-      return [null, "unsupported-identity-source"];
+      return error("verify-identity.unsupported-identity-source");
   }
 }
 
@@ -1616,8 +1698,8 @@ async function getSession<TIdentity extends Identity>(
   ]);
 
   if (
-    idTokenVerificationError === "unset" &&
-    accessTokenVerificationError === "unset"
+    idTokenVerificationError?.type === "verify-id-token.unset" &&
+    accessTokenVerificationError?.type === "verify-access-token.unset"
   ) {
     return { status: "no-active-session" };
   }
@@ -1662,7 +1744,12 @@ async function getSession<TIdentity extends Identity>(
 async function fetchAuthorizationServer(
   issuer: URL,
   allowInsecure: boolean,
-): Promise<Result<oauth.AuthorizationServer, "request-error">> {
+): Promise<
+  Result<
+    oauth.AuthorizationServer,
+    Err<"fetch-authorization-server.request-error">
+  >
+> {
   try {
     const discoveryResponse = await oauth.discoveryRequest(issuer, {
       [allowInsecureRequests]: allowInsecure,
@@ -1671,9 +1758,9 @@ async function fetchAuthorizationServer(
       issuer,
       discoveryResponse,
     );
-    return [authorizationServer, null];
+    return ok(authorizationServer);
   } catch (e) {
-    return [null, "request-error"];
+    return error("fetch-authorization-server.request-error");
   }
 }
 
@@ -1686,9 +1773,14 @@ async function fetchAuthorizationServer(
  */
 async function fetchJWKS(
   authorizationServer: oauth.AuthorizationServer,
-): Promise<Result<oauth.JWKS, "request-error" | "jwks-not-supported">> {
+): Promise<
+  Result<
+    oauth.JWKS,
+    Err<"fetch-jwks.request-error"> | Err<"fetch-jwks.not-supported">
+  >
+> {
   if (authorizationServer.jwks_uri === undefined) {
-    return [null, "jwks-not-supported"];
+    return error("fetch-jwks.not-supported");
   }
 
   try {
@@ -1697,13 +1789,13 @@ async function fetchJWKS(
       !jwksResponse.ok ||
       jwksResponse.headers.get("Content-Type") !== "application/json"
     ) {
-      return [null, "request-error"];
+      return error("fetch-jwks.request-error");
     }
 
     const jwks: oauth.JWKS = await jwksResponse.json();
-    return [jwks, null];
+    return ok(jwks);
   } catch {
-    return [null, "request-error"];
+    return error("fetch-jwks.request-error");
   }
 }
 
@@ -1722,7 +1814,7 @@ export interface CacheOptions {
 /**
  * Type for the cache wrapper function.
  */
-export type Cache = <TValue extends oauth.JsonValue, TError extends string>(
+export type Cache = <TValue extends oauth.JsonValue, TError extends Err>(
   getter: () => Promise<Result<TValue, TError>>,
   options?: CacheOptions,
 ) => () => Promise<Result<TValue, TError>>;
@@ -1739,7 +1831,7 @@ export type Cache = <TValue extends oauth.JsonValue, TError extends string>(
  * @param duration The duration for which the result is cached
  * @returns A function that returns a promise that resolves to the cached value
  */
-function functionCache<TValue extends oauth.JsonValue, TError extends string>(
+function functionCache<TValue extends oauth.JsonValue, TError extends Err>(
   getter: () => Promise<Result<TValue, TError>>,
   { duration }: CacheOptions = {},
 ): () => Promise<Result<TValue, TError>> {
@@ -1750,9 +1842,9 @@ function functionCache<TValue extends oauth.JsonValue, TError extends string>(
 
   const get = async () => {
     const result = await getter();
-    const [_, error] = result;
+    const [_, getError] = result;
     if (cachedValue !== null) {
-      if (error !== null) {
+      if (getError !== null) {
         cachedValue.expiresAt = Date.now() + Math.random() * 4000 + 1000; // wait at least 1 second, at most 5.
       } else {
         cachedValue.expiresAt =
@@ -2027,9 +2119,9 @@ export interface AuthenticationProvider<TIdentity extends Identity> {
     options?: SignInOptions,
   ) => Promise<
     | void
-    | "generating-authorization-url-failed"
-    | "setting-cookies-failed"
-    | "preparing-context-failed"
+    | Err<"sign-in.generating-authorization-url-failed">
+    | Err<"sign-in.setting-cookies-failed">
+    | Err<"sign-in.preparing-context-failed">
   >;
 
   /**
@@ -2043,7 +2135,7 @@ export interface AuthenticationProvider<TIdentity extends Identity> {
    */
   signOut: (
     options?: SignOutOptions,
-  ) => Promise<void | "preparing-context-failed">;
+  ) => Promise<void | Err<"sign-out.preparing-context-failed">>;
 
   /**
    * The handler function for the callback endpoint.
@@ -2117,7 +2209,7 @@ export function configureAuthenticationProvider<TIdentity extends Identity>({
 }: AuthenticationProviderConfig<TIdentity>): AuthenticationProvider<TIdentity> {
   const getAuthorizationServer = cache<
     oauth.AuthorizationServer,
-    "request-error"
+    Err<"fetch-authorization-server.request-error">
   >(() =>
     fetchAuthorizationServer(
       issuer,
@@ -2146,7 +2238,11 @@ export function configureAuthenticationProvider<TIdentity extends Identity>({
   getJWKS();
 
   const getContext = async (): Promise<
-    Result<AuthContext<TIdentity>, "authorization-server-error" | "jwks-error">
+    Result<
+      AuthContext<TIdentity>,
+      | Err<"get-context.authorization-server-error">
+      | Err<"get-context.jwks-error">
+    >
   > => {
     const _headers = await headers();
     const secure =
@@ -2157,13 +2253,13 @@ export function configureAuthenticationProvider<TIdentity extends Identity>({
     const [authorizationServer, authorizationServerError] =
       await getAuthorizationServer();
     if (authorizationServerError !== null) {
-      return [null, "authorization-server-error"];
+      return error("get-context.authorization-server-error");
     }
 
     const [jwks, jwksError] = await getJWKS();
 
     if (jwksError !== null) {
-      return [null, "jwks-error"];
+      return error("get-context.jwks-error");
     }
 
     const getJWKFromSet = jose.createLocalJWKSet(
@@ -2176,7 +2272,7 @@ export function configureAuthenticationProvider<TIdentity extends Identity>({
     redirectUrlFromCallbackError ??= async (error) => {
       const requestUrl = await getRequestUrl();
       const returnUrl = new URL(requestUrl.origin);
-      returnUrl.searchParams.set("einfach_auth_error", error);
+      returnUrl.searchParams.set("einfach_auth_error", error.type);
       return returnUrl;
     };
     const context = {
@@ -2206,10 +2302,12 @@ export function configureAuthenticationProvider<TIdentity extends Identity>({
       canonicalHost,
     } satisfies AuthContext<TIdentity>;
 
-    return [context, null];
+    return ok(context);
   };
 
-  const session: () => Promise<Session<TIdentity>> = React.cache(async () => {
+  const session: () => ReturnType<
+    AuthenticationProvider<TIdentity>["session"]
+  > = React.cache(async () => {
     const [context, contextError] = await getContext();
     if (contextError !== null) {
       return {
@@ -2222,37 +2320,37 @@ export function configureAuthenticationProvider<TIdentity extends Identity>({
   return {
     async signIn(
       options?: SignInOptions,
-    ): Promise<
-      | void
-      | "generating-authorization-url-failed"
-      | "setting-cookies-failed"
-      | "preparing-context-failed"
-    > {
+    ): ReturnType<AuthenticationProvider<TIdentity>["signIn"]> {
       const [context, contextError] = await getContext();
       if (contextError !== null) {
-        return "preparing-context-failed";
+        return err("sign-in.preparing-context-failed");
       }
       return await signIn(context, options ?? {});
     },
     async signOut(
       options?: SignOutOptions,
-    ): Promise<void | "preparing-context-failed"> {
+    ): ReturnType<AuthenticationProvider<TIdentity>["signOut"]> {
       const [context, contextError] = await getContext();
       if (contextError !== null) {
-        return "preparing-context-failed";
+        return err("sign-out.preparing-context-failed");
       }
       return await signOut(context, options ?? {});
     },
-    async callback(request: NextRequest): Promise<NextResponse> {
+    async callback(
+      request: NextRequest,
+    ): ReturnType<AuthenticationProvider<TIdentity>["callback"]> {
       const [context, contextError] = await getContext();
       if (contextError !== null) {
+        // If preparing the context failed, we will not redirect to an error page
         return new NextResponse(null, {
           status: 500,
         });
       }
       return await callback(context, request);
     },
-    async middleware(request: NextRequest): Promise<NextResponse> {
+    async middleware(
+      request: NextRequest,
+    ): ReturnType<AuthenticationProvider<TIdentity>["middleware"]> {
       makeRequestUrlAvailable(request);
 
       const [context, contextError] = await getContext();
@@ -2264,7 +2362,9 @@ export function configureAuthenticationProvider<TIdentity extends Identity>({
 
       return await middleware(context, request);
     },
-    preloadSession(): void {
+    preloadSession(): ReturnType<
+      AuthenticationProvider<TIdentity>["preloadSession"]
+    > {
       // Don't await the session as we only want to initiate the loading but don't care about the result
       session();
     },
