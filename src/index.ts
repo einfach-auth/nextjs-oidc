@@ -641,12 +641,21 @@ function buildAuthCookie(
       value: string,
       expires: Date | number,
     ): ReturnType<AuthCookie["set"]> {
-      setCookie({
-        name: cookieName,
-        value: value,
-        expires: expires,
-        path: args.path,
-      });
+      try {
+        setCookie({
+          name: cookieName,
+          value: value,
+          expires: expires,
+          path: args.path,
+          httpOnly: true,
+          sameSite: "lax",
+          secure: context.secure,
+        });
+      } catch {
+        return err("set-cookie.operation-failed", undefined, {
+          cookieName,
+        });
+      }
       return null;
     },
     clear(): ReturnType<AuthCookie["clear"]> {
