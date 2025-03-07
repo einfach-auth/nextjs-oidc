@@ -1,6 +1,11 @@
 {
   "name": "@einfach-auth/nextjs-oidc",
-  "version": "0.1.0",
+  "version": "0.1.0-alpha.1",
+  "repository": "https://github.com/einfach-auth/nextjs-oidc",
+  "private": false,
+  "publishConfig": {
+    "access": "public"
+  },
   "author": "Fabian Haenel <contact@fabian-haenel.io>",
   "license": "BSD-3-Clause",
   "keywords": [
