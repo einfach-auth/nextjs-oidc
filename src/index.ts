@@ -784,7 +784,8 @@ async function getActionUrl(
 ): Promise<
   Result<
     URL,
-    Err<"get-action-url.host-undefined"> | Err<"get-action-url.untrusted-host">
+    | Err<"get-action-url.host-undefined">
+    | (Err<"get-action-url.untrusted-host"> & { host: string })
   >
 > {
   if (context.canonicalHost !== undefined) {
@@ -807,7 +808,7 @@ async function getActionUrl(
       typeof hostCheck === "string" ? host === hostCheck : hostCheck.test(host),
     ) === false
   ) {
-    return error("get-action-url.untrusted-host");
+    return error("get-action-url.untrusted-host", undefined, { host });
   }
 
   // @ts-expect-error `x-forwarded-proto` is not nullable, Next.js sets it by default
@@ -887,7 +888,12 @@ async function generateAuthorizationUrl(
     );
   } catch {
     // If the authorization endpoint is a bad URL we pretend that it is undefined as it has the same effect
-    return error("generate-authorization-url.endpoint-undefined");
+    return error(
+      "generate-authorization-url.endpoint-undefined",
+      err("bad-url", undefined, {
+        url: context.authorizationServer.authorization_endpoint,
+      }),
+    );
   }
 
   // Generate the challenge values
@@ -914,7 +920,10 @@ async function generateAuthorizationUrl(
 
   const [actionUrl, actionUrlError] = await getActionUrl(context);
   if (actionUrlError !== null) {
-    return error("generate-authorization-url.action-url-unavailable");
+    return error(
+      "generate-authorization-url.action-url-unavailable",
+      actionUrlError,
+    );
   }
   const redirectUrl = new URL(context.callbackPath, actionUrl);
   authorizationUrl.searchParams.set("redirect_uri", redirectUrl.toString());
@@ -931,7 +940,10 @@ async function generateAuthorizationUrl(
       await context.encryptionService.encrypt(plaintextState);
 
     if (encryptionError !== null) {
-      return error("generate-authorization-url.encryption-failed");
+      return error(
+        "generate-authorization-url.encryption-failed",
+        encryptionError,
+      );
     }
     authorizationUrl.searchParams.set("state", ciphertextState);
   }
@@ -1062,7 +1074,12 @@ async function generateEndSessionUrl(
     endSessionUrl = new URL(context.authorizationServer.end_session_endpoint);
   } catch {
     // If the authorization endpoint is a bad URL we pretend that it is undefined as it has the same effect
-    return error("generate-end-session-url.unsupported-endpoint");
+    return error(
+      "generate-end-session-url.unsupported-endpoint",
+      err("bad-url", undefined, {
+        url: context.authorizationServer.end_session_endpoint,
+      }),
+    );
   }
 
   endSessionUrl.searchParams.set("client_id", context.client.client_id);
@@ -1538,7 +1555,7 @@ async function verifyIdToken(
   const [idToken, idTokenCookieError] = await cookieJar.idToken.get();
 
   if (idTokenCookieError !== null) {
-    return error("verify-id-token.cookie-error");
+    return error("verify-id-token.cookie-error", idTokenCookieError);
   }
 
   if (idToken === undefined) {
@@ -1576,7 +1593,7 @@ async function verifyAccessToken(
     await cookieJar.accessToken.get();
 
   if (accessTokenCookieError !== null) {
-    return error("verify-access-token.cookie-error");
+    return error("verify-access-token.cookie-error", accessTokenCookieError);
   }
 
   if (accessToken === undefined) {
@@ -1823,7 +1840,7 @@ export interface CacheOptions {
 /**
  * Type for the cache wrapper function.
  */
-export type Cache = <TValue extends oauth.JsonValue, TError extends Err>(
+export type Cache = <TValue, TError extends Err>(
   getter: () => Promise<Result<TValue, TError>>,
   options?: CacheOptions,
 ) => () => Promise<Result<TValue, TError>>;
@@ -1840,7 +1857,7 @@ export type Cache = <TValue extends oauth.JsonValue, TError extends Err>(
  * @param duration The duration for which the result is cached
  * @returns A function that returns a promise that resolves to the cached value
  */
-function functionCache<TValue extends oauth.JsonValue, TError extends Err>(
+function functionCache<TValue, TError extends Err>(
   getter: () => Promise<Result<TValue, TError>>,
   { duration }: CacheOptions = {},
 ): () => Promise<Result<TValue, TError>> {
@@ -2211,7 +2228,7 @@ export function configureAuthenticationProvider<TIdentity extends Identity>({
   },
   cache = functionCache,
   jwksCachingDuration = 43_200_000,
-  trustForwardedHeaders = process.env.NODE_ENV === "development",
+  trustForwardedHeaders = undefined,
   allowedHosts = undefined,
   canonicalHost = undefined,
   ...config
@@ -2230,13 +2247,15 @@ export function configureAuthenticationProvider<TIdentity extends Identity>({
   // Preload authorization server
   getAuthorizationServer();
 
-  // @ts-expect-error
-  const getJWKS = cache<oauth.JWKS, "jwks-not-supported" | "request-error">(
+  const getJWKS = cache<
+    oauth.JWKS,
+    Err<"fetch-jwks.request-error"> | Err<"fetch-jwks.not-supported">
+  >(
     async () => {
       const [authorizationServer, authorizationServerError] =
         await getAuthorizationServer();
       if (authorizationServerError !== null) {
-        return "request-error";
+        return error("fetch-jwks.request-error", authorizationServerError);
       }
       return await fetchJWKS(authorizationServer);
     },
@@ -2262,13 +2281,16 @@ export function configureAuthenticationProvider<TIdentity extends Identity>({
     const [authorizationServer, authorizationServerError] =
       await getAuthorizationServer();
     if (authorizationServerError !== null) {
-      return error("get-context.authorization-server-error");
+      return error(
+        "get-context.authorization-server-error",
+        authorizationServerError,
+      );
     }
 
     const [jwks, jwksError] = await getJWKS();
 
     if (jwksError !== null) {
-      return error("get-context.jwks-error");
+      return error("get-context.jwks-error", jwksError);
     }
 
     const getJWKFromSet = jose.createLocalJWKSet(
@@ -2332,7 +2354,7 @@ export function configureAuthenticationProvider<TIdentity extends Identity>({
     ): ReturnType<AuthenticationProvider<TIdentity>["signIn"]> {
       const [context, contextError] = await getContext();
       if (contextError !== null) {
-        return err("sign-in.preparing-context-failed");
+        return err("sign-in.preparing-context-failed", contextError);
       }
       return await signIn(context, options ?? {});
     },
@@ -2341,7 +2363,7 @@ export function configureAuthenticationProvider<TIdentity extends Identity>({
     ): ReturnType<AuthenticationProvider<TIdentity>["signOut"]> {
       const [context, contextError] = await getContext();
       if (contextError !== null) {
-        return err("sign-out.preparing-context-failed");
+        return err("sign-out.preparing-context-failed", contextError);
       }
       return await signOut(context, options ?? {});
     },
