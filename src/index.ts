@@ -22,19 +22,23 @@ export type Result<TValue, TError extends Err> =
   | [TValue, null]
   | [null, TError];
 
-function err<TType extends string, TDetails extends Record<any, any> = {}>(
+function err<
+  TType extends string,
+  TDetails extends Record<any, any> = {},
+  TError extends Err<TType> & TDetails = Err<TType> & TDetails,
+>(
   type: TType,
   cause?: Err,
   details: TDetails = {} as Record<any, any>,
-): Err<TType> & TDetails {
+): TError {
   return { type, cause, ...details };
 }
 
-function error<TType extends string, TDetails extends Record<any, any> = {}>(
-  type: TType,
-  cause?: Err,
-  details?: TDetails,
-): [null, Err<TType> & TDetails] {
+function error<
+  TType extends string,
+  TDetails extends Record<any, any> = {},
+  TError extends Err<TType> & TDetails = Err<TType> & TDetails,
+>(type: TType, cause?: Err, details?: TDetails): [null, TError] {
   return [null, err(type, cause, details)];
 }
 
@@ -69,7 +73,7 @@ export interface EncryptionService {
       string,
       | Err<"encrypt.empty-input">
       | Err<"encrypt.service-unavailable">
-      | Err<"encrypt.operation-failed">
+      | (Err<"encrypt.operation-failed"> & { error: unknown })
     >
   >;
 
@@ -91,7 +95,7 @@ export interface EncryptionService {
       | Err<"decrypt.empty-input">
       | Err<"decrypt.bad-ciphertext">
       | Err<"decrypt.service-unavailable">
-      | Err<"decrypt.operation-failed">
+      | (Err<"decrypt.operation-failed"> & { error: unknown })
     >
   >;
 }
@@ -130,14 +134,7 @@ export function buildSecretEncryptionService(
   return {
     encrypt: async (
       plaintext: string,
-    ): Promise<
-      Result<
-        string,
-        | Err<"encrypt.empty-input">
-        | Err<"encrypt.service-unavailable">
-        | Err<"encrypt.operation-failed">
-      >
-    > => {
+    ): ReturnType<EncryptionService["encrypt"]> => {
       if (plaintext === "") {
         return error("encrypt.empty-input");
       }
@@ -158,22 +155,14 @@ export function buildSecretEncryptionService(
         return ok(
           `${Buffer.from(iv).toString("base64url")}.${Buffer.from(cipher).toString("base64url")}`,
         );
-      } catch {
-        return error("encrypt.operation-failed");
+      } catch (e) {
+        return error("encrypt.operation-failed", undefined, { error: e });
       }
     },
 
     decrypt: async (
       ciphertext: string,
-    ): Promise<
-      Result<
-        string,
-        | Err<"decrypt.empty-input">
-        | Err<"decrypt.bad-ciphertext">
-        | Err<"decrypt.service-unavailable">
-        | Err<"decrypt.operation-failed">
-      >
-    > => {
+    ): ReturnType<EncryptionService["decrypt"]> => {
       if (ciphertext === "") {
         return error("decrypt.empty-input");
       }
@@ -195,8 +184,8 @@ export function buildSecretEncryptionService(
           cipher,
         );
         return ok(Buffer.from(plaintext).toString());
-      } catch {
-        return error("decrypt.operation-failed");
+      } catch (e) {
+        return error("decrypt.operation-failed", undefined, { error: e });
       }
     },
   };
@@ -460,7 +449,7 @@ interface AuthCookie {
    * @param value The value to set.
    * @param expires The expiration date. If undefined no expiration date will be set.
    * @returns Success: null
-   * @returns Error("operation-failed"): The cookie cannot be set because it is read-only. (See Next.js docs)
+   * @returns Error("read-only"): The cookie cannot be set because it is read-only. (See Next.js docs)
    * @returns Error("encryption-failed"): The value could not be encrypted.
    */
   set(
@@ -468,7 +457,7 @@ interface AuthCookie {
     expires: Date | number | undefined,
   ): Promise<
     | null
-    | (Err<"set-cookie.operation-failed"> & { cookieName: string })
+    | (Err<"set-cookie.read-only"> & { cookieName: string })
     | (Err<"set-cookie.encryption-failed"> & { cookieName: string })
   >;
 
@@ -615,7 +604,7 @@ function buildAuthCookie(
             secure: context.secure,
           });
         } catch {
-          return err("set-cookie.operation-failed", undefined, {
+          return err("set-cookie.read-only", undefined, {
             cookieName,
           });
         }
@@ -652,7 +641,7 @@ function buildAuthCookie(
           secure: context.secure,
         });
       } catch {
-        return err("set-cookie.operation-failed", undefined, {
+        return err("set-cookie.read-only", undefined, {
           cookieName,
         });
       }
@@ -859,7 +848,7 @@ export async function getRequestUrl(): Promise<URL> {
  * @param context The auth context
  * @param plaintextState An optional state in plaintext to continue the session after signing in. Will be encrypted before appending to URL.
  * @returns Success: An object returning the authorization URL for the redirect, the generated code verifier and the nonce if required.
- * @returns Error(authorization-endpoint-undefined): The authorization endpoint is not defined in the OIDC discovery document.
+ * @returns Error(authorization-endpoint-unsupported): The authorization endpoint is not defined in the OIDC discovery document.
  * @returns Error(action-url-unavailable): The action URL is not available.
  * @returns Error(encryption-failed): The encryption of the state failed.
  */
@@ -873,27 +862,28 @@ async function generateAuthorizationUrl(
       nonce: string | undefined;
       codeVerifier: string;
     },
-    | Err<"generate-authorization-url.endpoint-undefined">
+    | Err<"generate-authorization-url.endpoint-unsupported">
+    | (Err<"generate-authorization-url.endpoint-bad-url"> & {
+        url: string;
+        error: unknown;
+      })
     | Err<"generate-authorization-url.action-url-unavailable">
     | Err<"generate-authorization-url.encryption-failed">
   >
 > {
   if (context.authorizationServer.authorization_endpoint === undefined) {
-    return error("generate-authorization-url.endpoint-undefined");
+    return error("generate-authorization-url.endpoint-unsupported");
   }
   let authorizationUrl: URL;
   try {
     authorizationUrl = new URL(
       context.authorizationServer.authorization_endpoint,
     );
-  } catch {
-    // If the authorization endpoint is a bad URL we pretend that it is undefined as it has the same effect
-    return error(
-      "generate-authorization-url.endpoint-undefined",
-      err("bad-url", undefined, {
-        url: context.authorizationServer.authorization_endpoint,
-      }),
-    );
+  } catch (e) {
+    return error("generate-authorization-url.endpoint-bad-url", undefined, {
+      url: context.authorizationServer.authorization_endpoint,
+      error: e,
+    });
   }
 
   // Generate the challenge values
@@ -935,17 +925,21 @@ async function generateAuthorizationUrl(
     codeChallengeMethod,
   );
 
-  if (plaintextState !== undefined && plaintextState !== "") {
-    const [ciphertextState, encryptionError] =
-      await context.encryptionService.encrypt(plaintextState);
+  if (plaintextState !== undefined) {
+    if (plaintextState === "") {
+      authorizationUrl.searchParams.set("state", "");
+    } else {
+      const [ciphertextState, encryptionError] =
+        await context.encryptionService.encrypt(plaintextState);
 
-    if (encryptionError !== null) {
-      return error(
-        "generate-authorization-url.encryption-failed",
-        encryptionError,
-      );
+      if (encryptionError !== null) {
+        return error(
+          "generate-authorization-url.encryption-failed",
+          encryptionError,
+        );
+      }
+      authorizationUrl.searchParams.set("state", ciphertextState);
     }
-    authorizationUrl.searchParams.set("state", ciphertextState);
   }
 
   return ok({
@@ -1024,7 +1018,9 @@ async function revokeToken(
   tokenTypeHint: "access_token" | "refresh_token",
   token: string | undefined,
 ): Promise<
-  null | Err<"revoke-token.not-supported"> | Err<"revoke-token.failed">
+  | null
+  | Err<"revoke-token.not-supported">
+  | (Err<"revoke-token.failed"> & { error: unknown })
 > {
   if (token === undefined) {
     return null;
@@ -1049,8 +1045,8 @@ async function revokeToken(
     );
     await oauth.processRevocationResponse(revocationResponse);
     return null;
-  } catch {
-    return err("revoke-token.failed");
+  } catch (e) {
+    return err("revoke-token.failed", undefined, { error: e });
   }
 }
 
@@ -1061,25 +1057,27 @@ async function generateEndSessionUrl(
 ): Promise<
   Result<
     URL,
-    | Err<"generate-end-session-url.unsupported-endpoint">
+    | Err<"generate-end-session-url.endpoint-unsupported">
+    | (Err<"generate-end-session-url.endpoint-bad-url"> & {
+        url: string;
+        error: unknown;
+      })
     | Err<"generate-end-session-url.action-url-unavailable">
     | Err<"generate-end-session-url.encryption-failed">
   >
 > {
   if (context.authorizationServer.end_session_endpoint === undefined) {
-    return error("generate-end-session-url.unsupported-endpoint");
+    return error("generate-end-session-url.endpoint-unsupported");
   }
   let endSessionUrl: URL;
   try {
     endSessionUrl = new URL(context.authorizationServer.end_session_endpoint);
-  } catch {
+  } catch (e) {
     // If the authorization endpoint is a bad URL we pretend that it is undefined as it has the same effect
-    return error(
-      "generate-end-session-url.unsupported-endpoint",
-      err("bad-url", undefined, {
-        url: context.authorizationServer.end_session_endpoint,
-      }),
-    );
+    return error("generate-end-session-url.endpoint-bad-url", undefined, {
+      url: context.authorizationServer.end_session_endpoint,
+      error: e,
+    });
   }
 
   endSessionUrl.searchParams.set("client_id", context.client.client_id);
@@ -1210,7 +1208,9 @@ async function setSessionCookies(
   cookieJar: CookieJar,
 ): Promise<
   | null
-  | Err<"set-session-cookies.id-token-verification-failed">
+  | (Err<"set-session-cookies.id-token-verification-failed"> & {
+      error: unknown;
+    })
   | Err<"set-session-cookies.setting-cookies-failed">
 > {
   // Get access, id and refresh token cookies
@@ -1230,8 +1230,14 @@ async function setSessionCookies(
         !!payload.exp && payload.exp > 0
           ? payload.exp * 1000
           : Date.now() + context.fallbackIdTokenTTL;
-    } catch {
-      return err("set-session-cookies.id-token-verification-failed");
+    } catch (e) {
+      return err(
+        "set-session-cookies.id-token-verification-failed",
+        undefined,
+        {
+          error: e,
+        },
+      );
     }
 
     const cookieError = await cookieJar.idToken.set(
@@ -1305,9 +1311,10 @@ async function callback(
   const errorResponse = async (
     type: CallbackError["type"],
     cause?: Err,
+    e?: unknown,
   ): Promise<NextResponse> => {
     const redirectUrl = await context.redirectUrlFromCallbackError(
-      err(type, cause),
+      err(type, cause, { error: e }),
       request,
     );
     response.headers.set("Location", redirectUrl.toString());
@@ -1348,12 +1355,12 @@ async function callback(
     );
   } catch (e) {
     if (e instanceof oauth.AuthorizationResponseError) {
-      return await errorResponse("callback.auth-error");
+      return await errorResponse("callback.auth-error", undefined, e);
     }
     if (e instanceof oauth.UnsupportedOperationError) {
-      return await errorResponse("callback.unsupported-flow");
+      return await errorResponse("callback.unsupported-flow", undefined, e);
     }
-    return await errorResponse("callback.request-error");
+    return await errorResponse("callback.request-error", undefined, e);
   }
 
   let tokenResponse: oauth.TokenEndpointResponse;
@@ -1380,9 +1387,13 @@ async function callback(
       e instanceof oauth.AuthorizationResponseError ||
       e instanceof oauth.ResponseBodyError
     ) {
-      return await errorResponse("callback.token-exchange-failed");
+      return await errorResponse(
+        "callback.token-exchange-failed",
+        undefined,
+        e,
+      );
     }
-    return await errorResponse("callback.request-error");
+    return await errorResponse("callback.request-error", undefined, e);
   }
 
   const setCookiesError = await setSessionCookies(
@@ -1549,7 +1560,7 @@ async function verifyIdToken(
     { idToken: string; verifiedIdToken: jose.JWTPayload },
     | Err<"verify-id-token.unset">
     | Err<"verify-id-token.cookie-error">
-    | Err<"verify-id-token.verification-failed">
+    | (Err<"verify-id-token.verification-failed"> & { error: unknown })
   >
 > {
   const [idToken, idTokenCookieError] = await cookieJar.idToken.get();
@@ -1566,7 +1577,9 @@ async function verifyIdToken(
     const { payload } = await jose.jwtVerify(idToken, context.getJWKFromSet);
     return ok({ idToken, verifiedIdToken: payload });
   } catch (e) {
-    return error("verify-id-token.verification-failed");
+    return error("verify-id-token.verification-failed", undefined, {
+      error: e,
+    });
   }
 }
 
@@ -1586,7 +1599,7 @@ async function verifyAccessToken(
     { accessToken: string; verifiedAccessToken: jose.JWTPayload | Identity },
     | Err<"verify-access-token.unset">
     | Err<"verify-access-token.cookie-error">
-    | Err<"verify-access-token.verification-failed">
+    | (Err<"verify-access-token.verification-failed"> & { error?: unknown })
   >
 > {
   const [accessToken, accessTokenCookieError] =
@@ -1612,7 +1625,9 @@ async function verifyAccessToken(
         verifiedAccessToken = payload;
         break;
       } catch (e) {
-        return error("verify-access-token.verification-failed");
+        return error("verify-access-token.verification-failed", undefined, {
+          error: e,
+        });
       }
     case "bearer":
       try {
@@ -1629,8 +1644,10 @@ async function verifyAccessToken(
           introspectResponse,
         );
         break;
-      } catch {
-        return error("verify-access-token.verification-failed");
+      } catch (e) {
+        return error("verify-access-token.verification-failed", undefined, {
+          error: e,
+        });
       }
     default:
       return error("verify-access-token.verification-failed");
@@ -1657,7 +1674,7 @@ async function verifyIdentity<TIdentity extends Identity>(
   Result<
     TIdentity | null,
     | Err<"verify-identity.unsupported-identity-source">
-    | Err<"verify-identity.verification-failed">
+    | (Err<"verify-identity.verification-failed"> & { error?: unknown })
   >
 > {
   if (typeof context.verifyIdentity === "function") {
@@ -1697,8 +1714,10 @@ async function verifyIdentity<TIdentity extends Identity>(
           userInfoResponse,
         );
         return ok(identity as unknown as TIdentity);
-      } catch {
-        return error("verify-identity.verification-failed");
+      } catch (e) {
+        return error("verify-identity.verification-failed", undefined, {
+          error: e,
+        });
       }
     default:
       return error("verify-identity.unsupported-identity-source");
@@ -1773,20 +1792,31 @@ async function fetchAuthorizationServer(
 ): Promise<
   Result<
     oauth.AuthorizationServer,
-    Err<"fetch-authorization-server.request-error">
+    | (Err<"fetch-authorization-server.request-error"> & { error: unknown })
+    | (Err<"fetch-authorization-server.response-error"> & { error: unknown })
   >
 > {
+  let discoveryResponse: Response;
   try {
-    const discoveryResponse = await oauth.discoveryRequest(issuer, {
+    discoveryResponse = await oauth.discoveryRequest(issuer, {
       [allowInsecureRequests]: allowInsecure,
     });
+  } catch (e) {
+    return error("fetch-authorization-server.request-error", undefined, {
+      error: e,
+    });
+  }
+
+  try {
     const authorizationServer = await oauth.processDiscoveryResponse(
       issuer,
       discoveryResponse,
     );
     return ok(authorizationServer);
   } catch (e) {
-    return error("fetch-authorization-server.request-error");
+    return error("fetch-authorization-server.response-error", undefined, {
+      error: e,
+    });
   }
 }
 
@@ -1802,7 +1832,9 @@ async function fetchJWKS(
 ): Promise<
   Result<
     oauth.JWKS,
-    Err<"fetch-jwks.request-error"> | Err<"fetch-jwks.not-supported">
+    | (Err<"fetch-jwks.request-error"> & { error: unknown })
+    | (Err<"fetch-jwks.response-error"> & { status: number })
+    | Err<"fetch-jwks.not-supported">
   >
 > {
   if (authorizationServer.jwks_uri === undefined) {
@@ -1811,17 +1843,16 @@ async function fetchJWKS(
 
   try {
     const jwksResponse = await fetch(authorizationServer.jwks_uri);
-    if (
-      !jwksResponse.ok ||
-      jwksResponse.headers.get("Content-Type") !== "application/json"
-    ) {
-      return error("fetch-jwks.request-error");
+    if (!jwksResponse.ok) {
+      return error("fetch-jwks.response-error", undefined, {
+        status: jwksResponse.status,
+      });
     }
 
     const jwks: oauth.JWKS = await jwksResponse.json();
     return ok(jwks);
-  } catch {
-    return error("fetch-jwks.request-error");
+  } catch (e) {
+    return error("fetch-jwks.request-error", undefined, { error: e });
   }
 }
 
@@ -2228,14 +2259,15 @@ export function configureAuthenticationProvider<TIdentity extends Identity>({
   },
   cache = functionCache,
   jwksCachingDuration = 43_200_000,
-  trustForwardedHeaders = undefined,
+  trustForwardedHeaders = process.env.NODE_ENV === "development",
   allowedHosts = undefined,
   canonicalHost = undefined,
   ...config
 }: AuthenticationProviderConfig<TIdentity>): AuthenticationProvider<TIdentity> {
   const getAuthorizationServer = cache<
     oauth.AuthorizationServer,
-    Err<"fetch-authorization-server.request-error">
+    | (Err<"fetch-authorization-server.request-error"> & { error: unknown })
+    | (Err<"fetch-authorization-server.response-error"> & { error: unknown })
   >(() =>
     fetchAuthorizationServer(
       issuer,
@@ -2249,13 +2281,16 @@ export function configureAuthenticationProvider<TIdentity extends Identity>({
 
   const getJWKS = cache<
     oauth.JWKS,
-    Err<"fetch-jwks.request-error"> | Err<"fetch-jwks.not-supported">
+    | Err<"fetch-jwks.unavailable">
+    | (Err<"fetch-jwks.request-error"> & { error: unknown })
+    | (Err<"fetch-jwks.response-error"> & { status: number })
+    | Err<"fetch-jwks.not-supported">
   >(
     async () => {
       const [authorizationServer, authorizationServerError] =
         await getAuthorizationServer();
       if (authorizationServerError !== null) {
-        return error("fetch-jwks.request-error", authorizationServerError);
+        return error("fetch-jwks.unavailable", authorizationServerError);
       }
       return await fetchJWKS(authorizationServer);
     },
