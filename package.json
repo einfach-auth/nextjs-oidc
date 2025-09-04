@@ -29,7 +29,7 @@
   "devDependencies": {
     "@types/node": "^22.13.2",
     "@types/react": "^19.0.8",
-    "next": "^15.1.7",
+    "next": "^15.4.7",
     "prettier": "4.0.0-alpha.10",
     "react": "^19.0.0",
     "tsup": "^8.3.6",
