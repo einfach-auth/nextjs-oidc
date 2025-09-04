@@ -1,6 +1,6 @@
 {
   "name": "@einfach-auth/nextjs-oidc",
-  "version": "0.1.0-alpha.2",
+  "version": "0.1.0",
   "repository": "https://github.com/einfach-auth/nextjs-oidc",
   "private": false,
   "publishConfig": {
